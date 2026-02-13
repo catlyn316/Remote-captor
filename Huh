@@ -1,0 +1,674 @@
+--[[  RemoteSpy v5  |  Delta iOS 平板版  ]]
+--  修正：拖拽改用 UIS 全局 Touch 事件（Delta 相容）
+--        介面佈局重新計算，移除 ClipsDescendants
+
+local UIS = game:GetService("UserInputService")
+local PL  = game:GetService("Players").LocalPlayer
+
+-- ── 資料 ──────────────────────────────────────────────
+local captured = {}
+local selId    = nil
+local loops    = {}; local loopN = 0
+local fRE, fRF = true, true
+
+-- ── 工具 ──────────────────────────────────────────────
+local function getPath(o)
+    if not o or not o.Parent then return "nil" end
+    local t,c={},o
+    while c and c~=game do table.insert(t,1,c.Name);c=c.Parent end
+    local s='game:GetService("'..(t[1] or "?")..'")'
+    for i=2,#t do
+        s=s..(t[i]:match("^[%a_][%w_]*$") and "."..t[i] or '["'..t[i]:gsub('"','\\"')..'"]')
+    end
+    return s
+end
+
+local function ser(v,d)
+    d=d or 0; if d>3 then return "..." end
+    local t=typeof(v)
+    if     t=="nil"      then return "nil"
+    elseif t=="boolean"  then return tostring(v)
+    elseif t=="number"   then return tostring(v)
+    elseif t=="string"   then return ("%q"):format(v)
+    elseif t=="Instance" then return getPath(v)
+    elseif t=="Vector3"  then return ("Vector3.new(%g,%g,%g)"):format(v.X,v.Y,v.Z)
+    elseif t=="Vector2"  then return ("Vector2.new(%g,%g)"):format(v.X,v.Y)
+    elseif t=="CFrame"   then local p=v.Position return("CFrame.new(%g,%g,%g)"):format(p.X,p.Y,p.Z)
+    elseif t=="Color3"   then return("Color3.fromRGB(%d,%d,%d)"):format(v.R*255,v.G*255,v.B*255)
+    elseif t=="EnumItem" then return tostring(v)
+    elseif t=="table"    then
+        local s={}
+        for k,val in pairs(v) do
+            local ks=type(k)=="string" and(k:match("^[%a_][%w_]*$") and k or'["'..k..'"]')or"["..tostring(k).."]"
+            table.insert(s,ks.."="..ser(val,d+1))
+        end
+        return "{"..table.concat(s,",").."}"
+    else return"nil--[["..t.."]]" end
+end
+
+local function mkCode(e)
+    local a={}; for _,v in ipairs(e.args) do table.insert(a,ser(v)) end
+    return e.path..":"..(e.rtype=="RemoteEvent" and "FireServer" or "InvokeServer").."("..table.concat(a,", ")..")"
+end
+
+local function clip(s)
+    if setclipboard    then setclipboard(s)
+    elseif toclipboard then toclipboard(s)
+    elseif Clipboard   then Clipboard.set(s) end
+end
+
+local function exec(code)
+    local ok,err=pcall(function() assert(loadstring(code))() end)
+    return ok,err
+end
+
+-- ── HOOK ──────────────────────────────────────────────
+local _nc
+_nc=hookmetamethod(game,"__namecall",newcclosure(function(self,...)
+    local m=getnamecallmethod()
+    if m=="FireServer" or m=="InvokeServer" then
+        local ok,cls=pcall(function() return self.ClassName end)
+        if ok and(cls=="RemoteEvent" or cls=="RemoteFunction") then
+            local ok2,path=pcall(getPath,self)
+            if ok2 then
+                local e={id=#captured+1,remote=self,rtype=cls,
+                    name=self.Name,path=path,args={...},method=m,ts=os.date("%H:%M:%S")}
+                e.code=mkCode(e)
+                table.insert(captured,e)
+                if _G._RSP5 then pcall(_G._RSP5,e) end
+            end
+        end
+    end
+    return _nc(self,...)
+end))
+
+-- ── 清理舊 GUI ────────────────────────────────────────
+for _,n in ipairs({"RSP5","RSP4","RSP3","RSPv2","RemoteSpyPro"}) do
+    pcall(function() game:GetService("CoreGui")[n]:Destroy() end)
+    pcall(function() PL.PlayerGui[n]:Destroy() end)
+end
+
+local SG=Instance.new("ScreenGui")
+SG.Name="RSP5"; SG.ResetOnSpawn=false
+SG.ZIndexBehavior=Enum.ZIndexBehavior.Sibling
+if not pcall(function() SG.Parent=game:GetService("CoreGui") end) then
+    SG.Parent=PL.PlayerGui
+end
+
+-- ── 色盤 ──────────────────────────────────────────────
+local K={
+    bg =Color3.fromRGB(12,13,19),  pnl=Color3.fromRGB(18,20,29),
+    p2 =Color3.fromRGB(23,26,40),  bdr=Color3.fromRGB(40,46,70),
+    acc=Color3.fromRGB(82,138,255),grn=Color3.fromRGB(55,200,112),
+    red=Color3.fromRGB(255,68,68), yel=Color3.fromRGB(252,188,48),
+    txt=Color3.fromRGB(212,218,235),dim=Color3.fromRGB(100,110,145),
+    cod=Color3.fromRGB(145,215,145),sel=Color3.fromRGB(30,52,100),
+    hov=Color3.fromRGB(26,30,50),  RE =Color3.fromRGB(52,172,255),
+    RF =Color3.fromRGB(195,85,255),
+}
+
+local function N(cls,p,par)
+    local o=Instance.new(cls)
+    for k,v in pairs(p) do o[k]=v end
+    if par then o.Parent=par end
+    return o
+end
+local F  =function(p,par) return N("Frame",p,par) end
+local L  =function(p,par) return N("TextLabel",p,par) end
+local B  =function(p,par) return N("TextButton",p,par) end
+local TB =function(p,par) return N("TextBox",p,par) end
+local SF =function(p,par) return N("ScrollingFrame",p,par) end
+local function rnd(r,o) N("UICorner",{CornerRadius=UDim.new(0,r)},o) end
+local function stk(c,t,o) N("UIStroke",{Color=c,Thickness=t},o) end
+local function lst(sp,o)
+    N("UIListLayout",{FillDirection=Enum.FillDirection.Vertical,
+        HorizontalAlignment=Enum.HorizontalAlignment.Left,
+        Padding=UDim.new(0,sp),SortOrder=Enum.SortOrder.LayoutOrder},o)
+end
+
+-- ══════════════════════════════════════
+--  主視窗  420 × 350
+--  佈局（絕對 Y）：
+--    Y=0   頂色條  H=2
+--    Y=2   標題列  H=28  → 底 30
+--    Y=32  搜尋列  H=24  → 底 56
+--    Y=60  主體    H=180 → 底 240
+--    Y=244 自訂區  H=94  → 底 338
+--    Y=340 狀態列  H=10
+-- ══════════════════════════════════════
+local WIN=F({Name="WIN",
+    Size=UDim2.new(0,420,0,352),
+    Position=UDim2.new(0,60,0,60),
+    BackgroundColor3=K.bg,
+    BorderSizePixel=0,
+    ClipsDescendants=false},SG)   -- ★ 必須 false，否則子物件超出會被裁
+rnd(8,WIN); stk(K.bdr,1.5,WIN)
+
+-- 頂色條
+local tc=F({Size=UDim2.new(1,0,0,2),Position=UDim2.new(0,0,0,0),
+    BackgroundColor3=K.acc,BorderSizePixel=0},WIN)
+N("UIGradient",{Color=ColorSequence.new{
+    ColorSequenceKeypoint.new(0,Color3.fromRGB(110,72,255)),
+    ColorSequenceKeypoint.new(.5,K.acc),
+    ColorSequenceKeypoint.new(1,K.grn),
+}},tc)
+
+-- ── 標題列 Y=2 H=28 ──────────────────────────────────
+local TF=F({Size=UDim2.new(1,0,0,28),Position=UDim2.new(0,0,0,2),
+    BackgroundColor3=K.pnl,BorderSizePixel=0},WIN)
+
+-- 主標題（縮小時隱藏）
+local TITLELBL=L({Text="◈ 事件獲取器",Size=UDim2.new(0,110,0,16),Position=UDim2.new(0,8,0,2),
+    BackgroundTransparency=1,TextColor3=K.txt,Font=Enum.Font.GothamBold,
+    TextSize=11,TextXAlignment=Enum.TextXAlignment.Left},TF)
+-- 副標（縮小時隱藏）
+local BYLBL=L({Text="by 貓玲",Size=UDim2.new(0,60,0,11),Position=UDim2.new(0,10,0,17),
+    BackgroundTransparency=1,TextColor3=K.acc,Font=Enum.Font.Gotham,
+    TextSize=7,TextXAlignment=Enum.TextXAlignment.Left},TF)
+
+local CNTL=L({Text="0",Size=UDim2.new(0,70,1,0),Position=UDim2.new(0,112,0,0),
+    BackgroundTransparency=1,TextColor3=K.dim,Font=Enum.Font.Gotham,
+    TextSize=9,TextXAlignment=Enum.TextXAlignment.Left},TF)
+
+local function tB(txt,col,xOff)
+    local b=B({Text=txt,Size=UDim2.new(0,24,0,20),
+        Position=UDim2.new(1,xOff,0,4),
+        BackgroundColor3=K.p2,TextColor3=col,
+        Font=Enum.Font.GothamBold,TextSize=11,
+        BorderSizePixel=0,ZIndex=10},TF)
+    rnd(4,b); return b
+end
+local BCLOSE=tB("x",  K.red, -28)
+local BMIN  =tB("-",  K.yel, -56)
+local BCLR=B({Text="清",Size=UDim2.new(0,24,0,20),
+    Position=UDim2.new(1,-84,0,4),
+    BackgroundColor3=K.p2,TextColor3=K.dim,
+    Font=Enum.Font.Gotham,TextSize=10,
+    BorderSizePixel=0,ZIndex=10},TF)
+rnd(4,BCLR); stk(K.bdr,1,BCLR)
+
+-- ══════════════════════════════════════
+--  ★★★ 拖拽：Delta/iOS 相容版 ★★★
+--
+--  原因：Delta 上 Frame:TouchStarted 不可靠；
+--        touch.Id 在部分版本也是 nil。
+--  做法：用 UIS.TouchStarted（全局），
+--        手動判斷觸點是否落在標題列範圍內，
+--        用 touch（物件本身）做識別，
+--        位移直接讀 touch.Position（Vector3）。
+-- ══════════════════════════════════════
+local dragging   = false
+local dragTouch  = nil
+local dragOff    = Vector2.new(0,0)
+local mini       = false   -- ★ 提前宣告，供 inTitleBar 使用
+
+-- 判斷絕對座標是否在標題列的可拖動區
+-- 縮小時整個小方塊都可拖；展開時排除右側按鈕 92px
+local function inTitleBar(ax, ay)
+    local wp = WIN.AbsolutePosition
+    local ws = WIN.AbsoluteSize
+    if mini then
+        -- 縮小狀態：整個小方塊都是拖動區
+        return ax >= wp.X and ax <= wp.X + ws.X
+           and ay >= wp.Y and ay <= wp.Y + ws.Y
+    else
+        local tfH = 30
+        return ax >= wp.X
+           and ax <= wp.X + ws.X - 92
+           and ay >= wp.Y
+           and ay <= wp.Y + tfH
+    end
+end
+
+-- ★ 全局 TouchStarted
+UIS.TouchStarted:Connect(function(touch, _)
+    if dragTouch then return end     -- 已有觸控，忽略多指
+    local ax = touch.Position.X
+    local ay = touch.Position.Y
+    if inTitleBar(ax, ay) then
+        dragTouch = touch
+        dragging  = true
+        dragOff   = Vector2.new(ax, ay) - WIN.AbsolutePosition
+    end
+end)
+
+-- ★ 全局 TouchMoved
+UIS.TouchMoved:Connect(function(touch, _)
+    if not dragging or touch ~= dragTouch then return end
+    local ax = touch.Position.X
+    local ay = touch.Position.Y
+    WIN.Position = UDim2.new(0, ax - dragOff.X, 0, ay - dragOff.Y)
+end)
+
+-- ★ 全局 TouchEnded
+UIS.TouchEnded:Connect(function(touch, _)
+    if touch == dragTouch then
+        dragging  = false
+        dragTouch = nil
+    end
+end)
+
+-- PC 滑鼠備用（非 Delta 環境）
+TF.InputBegan:Connect(function(inp)
+    if inp.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
+    local ax = inp.Position.X
+    local ay = inp.Position.Y
+    if inTitleBar(ax, ay) then
+        dragging = true
+        dragOff  = Vector2.new(ax, ay) - WIN.AbsolutePosition
+    end
+end)
+
+UIS.InputChanged:Connect(function(inp)
+    if not dragging then return end
+    if inp.UserInputType == Enum.UserInputType.MouseMovement then
+        local ax = inp.Position.X
+        local ay = inp.Position.Y
+        WIN.Position = UDim2.new(0, ax - dragOff.X, 0, ay - dragOff.Y)
+    end
+end)
+
+UIS.InputEnded:Connect(function(inp)
+    if inp.UserInputType == Enum.UserInputType.MouseButton1 then
+        if mini then
+            -- PC 點擊小方塊展開
+            local ax = inp.Position.X
+            local ay = inp.Position.Y
+            local wp = WIN.AbsolutePosition
+            local ws = WIN.AbsoluteSize
+            if ax>=wp.X and ax<=wp.X+ws.X and ay>=wp.Y and ay<=wp.Y+ws.Y then
+                mini=false
+                BODY.Visible=true; SBF.Visible=true
+                EF.Visible=true;   STL.Visible=true
+                BCLR.Visible=true; CNTL.Visible=true
+                TITLELBL.Visible=true; BYLBL.Visible=true
+                MINILBL.Visible=false
+                WIN.Size=UDim2.new(0,420,0,352); TF.Size=UDim2.new(1,0,0,28)
+                BCLOSE.Visible=true; BMIN.Visible=true; tc.Visible=true
+            end
+        end
+        dragging = false
+    end
+end)
+
+-- ── 搜尋列 Y=32 H=24 ────────────────────────────────
+local SBF=F({Size=UDim2.new(1,-8,0,22),Position=UDim2.new(0,4,0,32),
+    BackgroundColor3=K.p2,BorderSizePixel=0},WIN)
+rnd(5,SBF); stk(K.bdr,1,SBF)
+
+L({Text="🔍",Size=UDim2.new(0,15,1,0),Position=UDim2.new(0,3,0,0),
+    BackgroundTransparency=1,TextColor3=K.dim,Font=Enum.Font.Gotham,TextSize=10},SBF)
+
+local SRCH=TB({Text="",PlaceholderText="搜尋...",
+    Size=UDim2.new(1,-66,1,0),Position=UDim2.new(0,18,0,0),
+    BackgroundTransparency=1,TextColor3=K.txt,PlaceholderColor3=K.dim,
+    Font=Enum.Font.Gotham,TextSize=10,ClearTextOnFocus=false,BorderSizePixel=0},SBF)
+
+local BRE=B({Text="RE",Size=UDim2.new(0,24,0,14),Position=UDim2.new(1,-52,0,4),
+    BackgroundColor3=Color3.fromRGB(15,40,64),TextColor3=K.RE,
+    Font=Enum.Font.GothamBold,TextSize=8,BorderSizePixel=0},SBF)
+rnd(3,BRE)
+
+local BRF2=B({Text="RF",Size=UDim2.new(0,24,0,14),Position=UDim2.new(1,-24,0,4),
+    BackgroundColor3=Color3.fromRGB(44,15,64),TextColor3=K.RF,
+    Font=Enum.Font.GothamBold,TextSize=8,BorderSizePixel=0},SBF)
+rnd(3,BRF2)
+
+-- ── 主體 Y=58 H=180 ─────────────────────────────────
+local BODY=F({Size=UDim2.new(1,-8,0,180),Position=UDim2.new(0,4,0,58),
+    BackgroundTransparency=1,BorderSizePixel=0},WIN)
+
+-- 左清單 170px
+local LF=F({Size=UDim2.new(0,170,1,0),BackgroundColor3=K.pnl,BorderSizePixel=0},BODY)
+rnd(5,LF); stk(K.bdr,1,LF)
+
+local LSF=SF({Size=UDim2.new(1,-2,1,-2),Position=UDim2.new(0,1,0,1),
+    BackgroundTransparency=1,BorderSizePixel=0,
+    ScrollBarThickness=4,ScrollBarImageColor3=K.acc,
+    CanvasSize=UDim2.new(0,0,0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y},LF)
+lst(1,LSF)
+
+-- 右詳情
+local RF2=F({Size=UDim2.new(1,-176,1,0),Position=UDim2.new(0,176,0,0),
+    BackgroundColor3=K.pnl,BorderSizePixel=0},BODY)
+rnd(5,RF2); stk(K.bdr,1,RF2)
+
+local DSF=SF({Size=UDim2.new(1,-4,1,-54),Position=UDim2.new(0,2,0,2),
+    BackgroundTransparency=1,BorderSizePixel=0,
+    ScrollBarThickness=4,ScrollBarImageColor3=K.acc,
+    CanvasSize=UDim2.new(0,0,0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y},RF2)
+
+local DTXT=L({Text="← 選事件",Size=UDim2.new(1,-2,0,14),
+    BackgroundTransparency=1,TextColor3=K.cod,Font=Enum.Font.Code,TextSize=8,
+    TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,
+    TextWrapped=true,AutomaticSize=Enum.AutomaticSize.Y},DSF)
+
+-- 右操作區
+local ABF=F({Size=UDim2.new(1,-4,0,50),Position=UDim2.new(0,2,1,-52),
+    BackgroundTransparency=1,BorderSizePixel=0},RF2)
+
+local function aB(txt,col,x,y,w)
+    local b=B({Text=txt,Size=UDim2.new(0,w or 80,0,20),
+        Position=UDim2.new(0,x,0,y),BackgroundColor3=K.p2,
+        TextColor3=col,Font=Enum.Font.GothamBold,TextSize=8,BorderSizePixel=0},ABF)
+    rnd(4,b); return b   -- ★ 移除 stk 外框
+end
+
+local ACPY=aB("📋 代碼",K.acc, 0, 0, 76)
+local APTH=aB("🔗 路徑",K.dim,80, 0, 72)
+local ARN1=aB("▶ 執行", K.grn, 0,24, 60)
+local ALOP=aB("🔁 重複",K.yel,64,24, 68)
+
+L({Text="隔幾秒",Size=UDim2.new(0,32,0,10),Position=UDim2.new(0,0,0,46),
+    BackgroundTransparency=1,TextColor3=K.dim,Font=Enum.Font.Gotham,TextSize=7},ABF)
+local IBOX=TB({Text="1",Size=UDim2.new(0,22,0,12),Position=UDim2.new(0,34,0,44),
+    BackgroundColor3=K.p2,TextColor3=K.txt,Font=Enum.Font.GothamBold,TextSize=8,
+    TextXAlignment=Enum.TextXAlignment.Center,BorderSizePixel=0,ClearTextOnFocus=false},ABF)
+rnd(2,IBOX); stk(K.bdr,1,IBOX)
+
+L({Text="重複幾次(0=∞)",Size=UDim2.new(0,70,0,10),Position=UDim2.new(0,60,0,46),
+    BackgroundTransparency=1,TextColor3=K.dim,Font=Enum.Font.Gotham,TextSize=7},ABF)
+local TBOX=TB({Text="0",Size=UDim2.new(0,22,0,12),Position=UDim2.new(0,132,0,44),
+    BackgroundColor3=K.p2,TextColor3=K.txt,Font=Enum.Font.GothamBold,TextSize=8,
+    TextXAlignment=Enum.TextXAlignment.Center,BorderSizePixel=0,ClearTextOnFocus=false},ABF)
+rnd(2,TBOX); stk(K.bdr,1,TBOX)
+
+-- ── 自訂代碼區 Y=242 H=94 ────────────────────────────
+local EF=F({Size=UDim2.new(1,-8,0,94),Position=UDim2.new(0,4,0,242),
+    BackgroundColor3=K.pnl,BorderSizePixel=0},WIN)
+rnd(5,EF); stk(K.bdr,1,EF)
+
+L({Text="自訂執行",Size=UDim2.new(1,0,0,14),Position=UDim2.new(0,5,0,1),
+    BackgroundTransparency=1,TextColor3=K.dim,Font=Enum.Font.GothamBold,
+    TextSize=9,TextXAlignment=Enum.TextXAlignment.Left},EF)
+
+local CBOX=TB({Text="",PlaceholderText="貼入 Lua 代碼…",
+    Size=UDim2.new(1,-6,0,50),Position=UDim2.new(0,3,0,16),
+    BackgroundColor3=Color3.fromRGB(9,10,15),TextColor3=K.cod,
+    PlaceholderColor3=K.dim,Font=Enum.Font.Code,TextSize=8,
+    TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,
+    MultiLine=true,TextWrapped=true,BorderSizePixel=0,ClearTextOnFocus=false},EF)
+rnd(4,CBOX); stk(K.bdr,1,CBOX)
+N("UIPadding",{PaddingTop=UDim.new(0,2),PaddingLeft=UDim.new(0,3),
+    PaddingRight=UDim.new(0,3),PaddingBottom=UDim.new(0,2)},CBOX)
+
+local EBR=F({Size=UDim2.new(1,-6,0,18),Position=UDim2.new(0,3,0,69),
+    BackgroundTransparency=1,BorderSizePixel=0},EF)
+
+local function eB(txt,col,x,w)
+    local b=B({Text=txt,Size=UDim2.new(0,w or 52,0,16),
+        Position=UDim2.new(0,x,0,0),BackgroundColor3=K.p2,
+        TextColor3=col,Font=Enum.Font.GothamBold,
+        TextSize=8,BorderSizePixel=0},EBR)
+    rnd(3,b); return b   -- ★ 移除 stk 外框
+end
+
+local ERN=eB("▶ 執行",K.grn, 0, 52)
+L({Text="隔幾秒",Size=UDim2.new(0,32,1,0),Position=UDim2.new(0,56,0,0),
+    BackgroundTransparency=1,TextColor3=K.dim,Font=Enum.Font.Gotham,TextSize=7},EBR)
+local EIB=TB({Text="1",Size=UDim2.new(0,20,0,14),Position=UDim2.new(0,89,0,1),
+    BackgroundColor3=K.p2,TextColor3=K.txt,Font=Enum.Font.GothamBold,TextSize=8,
+    TextXAlignment=Enum.TextXAlignment.Center,BorderSizePixel=0,ClearTextOnFocus=false},EBR)
+rnd(2,EIB); stk(K.bdr,1,EIB)
+
+L({Text="重複幾次(0=∞)",Size=UDim2.new(0,68,1,0),Position=UDim2.new(0,113,0,0),
+    BackgroundTransparency=1,TextColor3=K.dim,Font=Enum.Font.Gotham,TextSize=7},EBR)
+local ETB=TB({Text="0",Size=UDim2.new(0,20,0,14),Position=UDim2.new(0,183,0,1),
+    BackgroundColor3=K.p2,TextColor3=K.txt,Font=Enum.Font.GothamBold,TextSize=8,
+    TextXAlignment=Enum.TextXAlignment.Center,BorderSizePixel=0,ClearTextOnFocus=false},EBR)
+rnd(2,ETB); stk(K.bdr,1,ETB)
+
+local ELP=eB("🔁 重複",K.yel,207, 58)
+local ESP=eB("⬛ 全停", K.red,269, 50)
+
+-- 狀態列 Y=340
+local STL=L({Text="就緒",Size=UDim2.new(1,-8,0,10),
+    Position=UDim2.new(0,4,0,340),
+    BackgroundTransparency=1,TextColor3=K.dim,
+    Font=Enum.Font.Gotham,TextSize=7,
+    TextXAlignment=Enum.TextXAlignment.Left},WIN)
+
+-- ── 狀態函式 ──────────────────────────────────────────
+local function st(msg,col)
+    STL.Text=msg; STL.TextColor3=col or K.dim
+    task.delay(4,function()
+        if STL.Text==msg then STL.Text="就緒";STL.TextColor3=K.dim end
+    end)
+end
+
+-- ── 前向宣告 ──────────────────────────────────────────
+local showDetail, refreshList
+
+-- ── 清單列 ────────────────────────────────────────────
+local function makeRow(e)
+    local isRE=e.rtype=="RemoteEvent"
+    local rc=isRE and K.RE or K.RF
+
+    local row=B({Text="",Size=UDim2.new(1,-4,0,30),
+        BackgroundColor3=selId==e.id and K.sel or K.p2,
+        BorderSizePixel=0,AutoButtonColor=false,LayoutOrder=-e.id},LSF)
+    rnd(4,row)
+    if selId==e.id then stk(K.acc,1,row) end
+
+    local bdg=L({Text=isRE and "RE" or "RF",
+        Size=UDim2.new(0,18,0,11),Position=UDim2.new(0,3,0,4),
+        BackgroundColor3=Color3.fromRGB(12,16,28),
+        TextColor3=rc,Font=Enum.Font.GothamBold,TextSize=7,
+        TextXAlignment=Enum.TextXAlignment.Center},row)
+    rnd(3,bdg); stk(rc,1,bdg)
+
+    L({Text=e.name,Size=UDim2.new(1,-26,0,14),Position=UDim2.new(0,24,0,2),
+        BackgroundTransparency=1,TextColor3=K.txt,Font=Enum.Font.GothamBold,
+        TextSize=10,TextXAlignment=Enum.TextXAlignment.Left,
+        TextTruncate=Enum.TextTruncate.AtEnd},row)
+
+    L({Text=e.ts,Size=UDim2.new(0,38,0,11),Position=UDim2.new(1,-40,0,2),
+        BackgroundTransparency=1,TextColor3=K.dim,Font=Enum.Font.Gotham,
+        TextSize=7,TextXAlignment=Enum.TextXAlignment.Right},row)
+
+    local prev=#e.args>0 and ser(e.args[1]):sub(1,22)..(#e.args>1 and "…" or "") or "(空)"
+    L({Text=prev,Size=UDim2.new(1,-5,0,11),Position=UDim2.new(0,3,0,18),
+        BackgroundTransparency=1,TextColor3=K.dim,Font=Enum.Font.Code,
+        TextSize=7,TextXAlignment=Enum.TextXAlignment.Left,
+        TextTruncate=Enum.TextTruncate.AtEnd},row)
+
+    row.MouseButton1Click:Connect(function()
+        selId=e.id; CBOX.Text=e.code
+        refreshList(); showDetail(e)
+    end)
+    row.MouseEnter:Connect(function()
+        if selId~=e.id then row.BackgroundColor3=K.hov end
+    end)
+    row.MouseLeave:Connect(function()
+        if selId~=e.id then row.BackgroundColor3=K.p2 end
+    end)
+end
+
+-- ── refreshList ───────────────────────────────────────
+refreshList=function()
+    for _,c in ipairs(LSF:GetChildren()) do
+        if c:IsA("TextButton") then c:Destroy() end
+    end
+    local term=SRCH.Text:lower(); local shown=0
+    for i=#captured,1,-1 do
+        local e=captured[i]
+        local mt=(e.rtype=="RemoteEvent" and fRE) or (e.rtype=="RemoteFunction" and fRF)
+        local mn=term=="" or e.name:lower():find(term,1,true)
+        if mt and mn then makeRow(e);shown=shown+1 end
+    end
+    CNTL.Text=#captured.." | "..shown
+end
+
+-- ── showDetail ────────────────────────────────────────
+showDetail=function(e)
+    if not e then DTXT.Text="← 選事件";return end
+    local ln={"名: "..e.name,"型: "..e.rtype,"路: "..e.path,"時: "..e.ts,"","參數("..#e.args.."個):"}
+    for i,a in ipairs(e.args) do
+        table.insert(ln,("  [%d]%s=%s"):format(i,typeof(a),ser(a)))
+    end
+    table.insert(ln,"\n"..e.code)
+    DTXT.Text=table.concat(ln,"\n")
+end
+
+-- ── _G 橋接 ───────────────────────────────────────────
+_G._RSP5=function(e)
+    makeRow(e)
+    CNTL.Text=#captured.." | ?"
+end
+
+-- ── 執行 ──────────────────────────────────────────────
+local function runOnce(code)
+    local ok,err=exec(code)
+    if ok then st("✅ 執行成功",K.grn)
+    else      st("❌ "..tostring(err):sub(1,50),K.red) end
+end
+
+local function startLoop(code,iv,tm)
+    loopN=loopN+1;local id=loopN;loops[id]=true
+    st("🔁["..id.."] "..(tm==0 and "∞" or tm).."次 "..iv.."s",K.yel)
+    task.spawn(function()
+        local n=0
+        while loops[id] do
+            n=n+1; exec(code)
+            if tm>0 and n>=tm then break end
+            task.wait(math.max(0.05,iv))
+        end
+        loops[id]=nil
+        st("✅["..id.."] 結束 "..n.."次",K.grn)
+    end)
+end
+
+local function stopAll()
+    local n=0
+    for id in pairs(loops) do loops[id]=nil;n=n+1 end
+    st("⬛ 停止"..n.."個",K.red)
+end
+
+local function getSel()
+    if not selId then return nil end
+    for _,e in ipairs(captured) do if e.id==selId then return e end end
+end
+
+-- ── 按鈕事件 ──────────────────────────────────────────
+BCLOSE.MouseButton1Click:Connect(function() stopAll();SG:Destroy() end)
+
+-- 縮小狀態用的小方塊標籤（預設隱藏，mini 已在上方宣告）
+local MINILBL=L({Text="RSP",Size=UDim2.new(1,0,1,0),Position=UDim2.new(0,0,0,0),
+    BackgroundTransparency=1,TextColor3=K.acc,Font=Enum.Font.GothamBold,
+    TextSize=13,TextXAlignment=Enum.TextXAlignment.Center,
+    TextYAlignment=Enum.TextYAlignment.Center,Visible=false,ZIndex=8},TF)
+
+BMIN.MouseButton1Click:Connect(function()
+    mini=not mini
+    -- 展開/縮小切換
+    BODY.Visible    = not mini
+    SBF.Visible     = not mini
+    EF.Visible      = not mini
+    STL.Visible     = not mini
+    BCLR.Visible    = not mini
+    CNTL.Visible    = not mini
+    TITLELBL.Visible= not mini   -- ★ 縮小時隱藏標題
+    BYLBL.Visible   = not mini   -- ★ 縮小時隱藏副標
+    MINILBL.Visible = mini
+    if mini then
+        WIN.Size   = UDim2.new(0,50,0,50)
+        TF.Size    = UDim2.new(1,0,1,0)
+        BCLOSE.Visible = false
+        BMIN.Visible   = false
+        tc.Visible     = false
+    else
+        WIN.Size   = UDim2.new(0,420,0,352)
+        TF.Size    = UDim2.new(1,0,0,28)
+        BCLOSE.Visible = true
+        BMIN.Visible   = true
+        tc.Visible     = true
+    end
+end)
+
+-- 點擊縮小後的小方塊展開
+-- 用 TouchEnded 且位移小於 10px 才算點擊，避免拖拽誤觸
+local miniTouchStart = nil
+UIS.TouchStarted:Connect(function(touch, _)
+    if not mini then return end
+    miniTouchStart = Vector2.new(touch.Position.X, touch.Position.Y)
+end)
+UIS.TouchEnded:Connect(function(touch, _)
+    if not mini then miniTouchStart=nil; return end
+    if miniTouchStart then
+        local dx = touch.Position.X - miniTouchStart.X
+        local dy = touch.Position.Y - miniTouchStart.Y
+        local dist = math.sqrt(dx*dx + dy*dy)
+        miniTouchStart = nil
+        if dist < 12 then
+            mini = false
+            BODY.Visible=true; SBF.Visible=true
+            EF.Visible=true;   STL.Visible=true
+            BCLR.Visible=true; CNTL.Visible=true
+            TITLELBL.Visible=true; BYLBL.Visible=true
+            MINILBL.Visible=false
+            WIN.Size   = UDim2.new(0,420,0,352)
+            TF.Size    = UDim2.new(1,0,0,28)
+            BCLOSE.Visible=true; BMIN.Visible=true; tc.Visible=true
+        end
+    end
+end)
+
+BCLR.MouseButton1Click:Connect(function()
+    captured={};selId=nil
+    for _,c in ipairs(LSF:GetChildren()) do
+        if c:IsA("TextButton") then c:Destroy() end
+    end
+    showDetail(nil);CNTL.Text="0"
+    st("🗑 清除",K.dim)
+end)
+
+SRCH:GetPropertyChangedSignal("Text"):Connect(refreshList)
+
+BRE.MouseButton1Click:Connect(function()
+    fRE=not fRE
+    BRE.BackgroundColor3=fRE and Color3.fromRGB(15,40,64) or K.p2
+    BRE.TextColor3=fRE and K.RE or K.dim
+    refreshList()
+end)
+BRF2.MouseButton1Click:Connect(function()
+    fRF=not fRF
+    BRF2.BackgroundColor3=fRF and Color3.fromRGB(44,15,64) or K.p2
+    BRF2.TextColor3=fRF and K.RF or K.dim
+    refreshList()
+end)
+
+ACPY.MouseButton1Click:Connect(function()
+    local e=getSel();if not e then st("⚠ 先選事件",K.yel);return end
+    clip(e.code);st("📋 代碼已複製",K.grn)
+end)
+APTH.MouseButton1Click:Connect(function()
+    local e=getSel();if not e then st("⚠ 先選事件",K.yel);return end
+    clip(e.path);st("🔗 路徑已複製",K.grn)
+end)
+ARN1.MouseButton1Click:Connect(function()
+    local e=getSel();if not e then st("⚠ 先選事件",K.yel);return end
+    runOnce(e.code)
+end)
+ALOP.MouseButton1Click:Connect(function()
+    local e=getSel();if not e then st("⚠ 先選事件",K.yel);return end
+    startLoop(e.code,
+        math.max(0.05,tonumber(IBOX.Text) or 1),
+        math.max(0,tonumber(TBOX.Text) or 0))
+end)
+
+ERN.MouseButton1Click:Connect(function()
+    local c=CBOX.Text;if c=="" then st("⚠ 空的",K.yel);return end
+    runOnce(c)
+end)
+ELP.MouseButton1Click:Connect(function()
+    local c=CBOX.Text;if c=="" then st("⚠ 空的",K.yel);return end
+    startLoop(c,
+        math.max(0.05,tonumber(EIB.Text) or 1),
+        math.max(0,tonumber(ETB.Text) or 0))
+end)
+ESP.MouseButton1Click:Connect(function() stopAll() end)
+
+-- ── 啟動 ──────────────────────────────────────────────
+refreshList()
+st("✅ 啟動，監聽中…",K.grn)
+print("[RSP v5] Delta ready")
