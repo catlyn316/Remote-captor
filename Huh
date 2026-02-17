@@ -1,6 +1,9 @@
 --[[  RemoteSpy v5  |  Delta iOS 平板版  ]]
 --  修正：拖拽改用 UIS 全局 Touch 事件（Delta 相容）
 --        介面佈局重新計算，移除 ClipsDescendants
+--        修正縮小後點擊誤觸問題（只有點小方塊才展開）
+--        修正縮小後 TF 超出圓角（動態圓角切換）
+--        新增無事件提示
 
 local UIS = game:GetService("UserInputService")
 local PL  = game:GetService("Players").LocalPlayer
@@ -141,7 +144,7 @@ local WIN=F({Name="WIN",
     Position=UDim2.new(0,60,0,60),
     BackgroundColor3=K.bg,
     BorderSizePixel=0,
-    ClipsDescendants=false},SG)   -- ★ 必須 false，否則子物件超出會被裁
+    ClipsDescendants=false},SG)
 rnd(8,WIN); stk(K.bdr,1.5,WIN)
 
 -- 頂色條
@@ -156,6 +159,7 @@ N("UIGradient",{Color=ColorSequence.new{
 -- ── 標題列 Y=2 H=28 ──────────────────────────────────
 local TF=F({Size=UDim2.new(1,0,0,28),Position=UDim2.new(0,0,0,2),
     BackgroundColor3=K.pnl,BorderSizePixel=0},WIN)
+local TF_CORNER=N("UICorner",{CornerRadius=UDim.new(0,0)},TF)  -- ★ 動態圓角
 
 -- 主標題（縮小時隱藏）
 local TITLELBL=L({Text="◈ 事件獲取器",Size=UDim2.new(0,110,0,16),Position=UDim2.new(0,8,0,2),
@@ -189,26 +193,17 @@ rnd(4,BCLR); stk(K.bdr,1,BCLR)
 
 -- ══════════════════════════════════════
 --  ★★★ 拖拽：Delta/iOS 相容版 ★★★
---
---  原因：Delta 上 Frame:TouchStarted 不可靠；
---        touch.Id 在部分版本也是 nil。
---  做法：用 UIS.TouchStarted（全局），
---        手動判斷觸點是否落在標題列範圍內，
---        用 touch（物件本身）做識別，
---        位移直接讀 touch.Position（Vector3）。
 -- ══════════════════════════════════════
 local dragging   = false
 local dragTouch  = nil
 local dragOff    = Vector2.new(0,0)
-local mini       = false   -- ★ 提前宣告，供 inTitleBar 使用
+local mini       = false
 
 -- 判斷絕對座標是否在標題列的可拖動區
--- 縮小時整個小方塊都可拖；展開時排除右側按鈕 92px
 local function inTitleBar(ax, ay)
     local wp = WIN.AbsolutePosition
     local ws = WIN.AbsoluteSize
     if mini then
-        -- 縮小狀態：整個小方塊都是拖動區
         return ax >= wp.X and ax <= wp.X + ws.X
            and ay >= wp.Y and ay <= wp.Y + ws.Y
     else
@@ -222,7 +217,7 @@ end
 
 -- ★ 全局 TouchStarted
 UIS.TouchStarted:Connect(function(touch, _)
-    if dragTouch then return end     -- 已有觸控，忽略多指
+    if dragTouch then return end
     local ax = touch.Position.X
     local ay = touch.Position.Y
     if inTitleBar(ax, ay) then
@@ -248,7 +243,7 @@ UIS.TouchEnded:Connect(function(touch, _)
     end
 end)
 
--- PC 滑鼠備用（非 Delta 環境）
+-- PC 滑鼠備用
 TF.InputBegan:Connect(function(inp)
     if inp.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
     local ax = inp.Position.X
@@ -271,7 +266,6 @@ end)
 UIS.InputEnded:Connect(function(inp)
     if inp.UserInputType == Enum.UserInputType.MouseButton1 then
         if mini then
-            -- PC 點擊小方塊展開
             local ax = inp.Position.X
             local ay = inp.Position.Y
             local wp = WIN.AbsolutePosition
@@ -284,6 +278,7 @@ UIS.InputEnded:Connect(function(inp)
                 TITLELBL.Visible=true; BYLBL.Visible=true
                 MINILBL.Visible=false
                 WIN.Size=UDim2.new(0,420,0,352); TF.Size=UDim2.new(1,0,0,28)
+                TF_CORNER.CornerRadius = UDim.new(0,0)  -- ★ 展開時移除圓角
                 BCLOSE.Visible=true; BMIN.Visible=true; tc.Visible=true
             end
         end
@@ -328,6 +323,15 @@ local LSF=SF({Size=UDim2.new(1,-2,1,-2),Position=UDim2.new(0,1,0,1),
     CanvasSize=UDim2.new(0,0,0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y},LF)
 lst(1,LSF)
 
+-- ★ 無事件提示
+local EMPTYLBL=L({Text="尚無事件\n等待捕獲中...",
+    Size=UDim2.new(1,-10,1,-10),Position=UDim2.new(0,5,0,5),
+    BackgroundTransparency=1,TextColor3=K.dim,
+    Font=Enum.Font.Gotham,TextSize=9,
+    TextXAlignment=Enum.TextXAlignment.Center,
+    TextYAlignment=Enum.TextYAlignment.Center,
+    Visible=true},LF)
+
 -- 右詳情
 local RF2=F({Size=UDim2.new(1,-176,1,0),Position=UDim2.new(0,176,0,0),
     BackgroundColor3=K.pnl,BorderSizePixel=0},BODY)
@@ -351,7 +355,7 @@ local function aB(txt,col,x,y,w)
     local b=B({Text=txt,Size=UDim2.new(0,w or 80,0,20),
         Position=UDim2.new(0,x,0,y),BackgroundColor3=K.p2,
         TextColor3=col,Font=Enum.Font.GothamBold,TextSize=8,BorderSizePixel=0},ABF)
-    rnd(4,b); return b   -- ★ 移除 stk 外框
+    rnd(4,b); return b
 end
 
 local ACPY=aB("📋 代碼",K.acc, 0, 0, 76)
@@ -400,7 +404,7 @@ local function eB(txt,col,x,w)
         Position=UDim2.new(0,x,0,0),BackgroundColor3=K.p2,
         TextColor3=col,Font=Enum.Font.GothamBold,
         TextSize=8,BorderSizePixel=0},EBR)
-    rnd(3,b); return b   -- ★ 移除 stk 外框
+    rnd(3,b); return b
 end
 
 local ERN=eB("▶ 執行",K.grn, 0, 52)
@@ -427,6 +431,12 @@ local STL=L({Text="就緒",Size=UDim2.new(1,-8,0,10),
     BackgroundTransparency=1,TextColor3=K.dim,
     Font=Enum.Font.Gotham,TextSize=7,
     TextXAlignment=Enum.TextXAlignment.Left},WIN)
+
+-- 縮小狀態用的小方塊標籤
+local MINILBL=L({Text="RSP",Size=UDim2.new(1,-6,1,-6),Position=UDim2.new(0,3,0,3),
+    BackgroundTransparency=1,TextColor3=K.acc,Font=Enum.Font.GothamBold,
+    TextSize=13,TextXAlignment=Enum.TextXAlignment.Center,
+    TextYAlignment=Enum.TextYAlignment.Center,Visible=false,ZIndex=8},TF)
 
 -- ── 狀態函式 ──────────────────────────────────────────
 local function st(msg,col)
@@ -497,6 +507,8 @@ refreshList=function()
         if mt and mn then makeRow(e);shown=shown+1 end
     end
     CNTL.Text=#captured.." | "..shown
+    -- ★ 控制無事件提示顯示
+    EMPTYLBL.Visible = (#captured == 0)
 end
 
 -- ── showDetail ────────────────────────────────────────
@@ -514,6 +526,7 @@ end
 _G._RSP5=function(e)
     makeRow(e)
     CNTL.Text=#captured.." | ?"
+    EMPTYLBL.Visible=false  -- ★ 有事件時隱藏提示
 end
 
 -- ── 執行 ──────────────────────────────────────────────
@@ -552,54 +565,63 @@ end
 -- ── 按鈕事件 ──────────────────────────────────────────
 BCLOSE.MouseButton1Click:Connect(function() stopAll();SG:Destroy() end)
 
--- 縮小狀態用的小方塊標籤（預設隱藏，mini 已在上方宣告）
-local MINILBL=L({Text="RSP",Size=UDim2.new(1,0,1,0),Position=UDim2.new(0,0,0,0),
-    BackgroundTransparency=1,TextColor3=K.acc,Font=Enum.Font.GothamBold,
-    TextSize=13,TextXAlignment=Enum.TextXAlignment.Center,
-    TextYAlignment=Enum.TextYAlignment.Center,Visible=false,ZIndex=8},TF)
-
 BMIN.MouseButton1Click:Connect(function()
     mini=not mini
-    -- 展開/縮小切換
     BODY.Visible    = not mini
     SBF.Visible     = not mini
     EF.Visible      = not mini
     STL.Visible     = not mini
     BCLR.Visible    = not mini
     CNTL.Visible    = not mini
-    TITLELBL.Visible= not mini   -- ★ 縮小時隱藏標題
-    BYLBL.Visible   = not mini   -- ★ 縮小時隱藏副標
+    TITLELBL.Visible= not mini
+    BYLBL.Visible   = not mini
     MINILBL.Visible = mini
     if mini then
         WIN.Size   = UDim2.new(0,50,0,50)
         TF.Size    = UDim2.new(1,0,1,0)
+        TF_CORNER.CornerRadius = UDim.new(0,8)  -- ★ 縮小時加圓角
         BCLOSE.Visible = false
         BMIN.Visible   = false
         tc.Visible     = false
     else
         WIN.Size   = UDim2.new(0,420,0,352)
         TF.Size    = UDim2.new(1,0,0,28)
+        TF_CORNER.CornerRadius = UDim.new(0,0)  -- ★ 展開時移除圓角
         BCLOSE.Visible = true
         BMIN.Visible   = true
         tc.Visible     = true
     end
 end)
 
--- 點擊縮小後的小方塊展開
--- 用 TouchEnded 且位移小於 10px 才算點擊，避免拖拽誤觸
+-- ★ 點擊縮小後的小方塊展開（觸控版，修正誤觸）
 local miniTouchStart = nil
 UIS.TouchStarted:Connect(function(touch, _)
     if not mini then return end
-    miniTouchStart = Vector2.new(touch.Position.X, touch.Position.Y)
+    local ax = touch.Position.X
+    local ay = touch.Position.Y
+    local wp = WIN.AbsolutePosition
+    local ws = WIN.AbsoluteSize
+    -- 只記錄點在小方塊上的觸控
+    if ax >= wp.X and ax <= wp.X + ws.X and ay >= wp.Y and ay <= wp.Y + ws.Y then
+        miniTouchStart = Vector2.new(ax, ay)
+    end
 end)
+
 UIS.TouchEnded:Connect(function(touch, _)
     if not mini then miniTouchStart=nil; return end
     if miniTouchStart then
         local dx = touch.Position.X - miniTouchStart.X
         local dy = touch.Position.Y - miniTouchStart.Y
         local dist = math.sqrt(dx*dx + dy*dy)
+        local endX = touch.Position.X
+        local endY = touch.Position.Y
         miniTouchStart = nil
-        if dist < 12 then
+        
+        -- 確認結束時手指還在小方塊上
+        local wp = WIN.AbsolutePosition
+        local ws = WIN.AbsoluteSize
+        if dist < 12 and endX >= wp.X and endX <= wp.X + ws.X 
+           and endY >= wp.Y and endY <= wp.Y + ws.Y then
             mini = false
             BODY.Visible=true; SBF.Visible=true
             EF.Visible=true;   STL.Visible=true
@@ -608,6 +630,7 @@ UIS.TouchEnded:Connect(function(touch, _)
             MINILBL.Visible=false
             WIN.Size   = UDim2.new(0,420,0,352)
             TF.Size    = UDim2.new(1,0,0,28)
+            TF_CORNER.CornerRadius = UDim.new(0,0)  -- ★ 展開時移除圓角
             BCLOSE.Visible=true; BMIN.Visible=true; tc.Visible=true
         end
     end
@@ -619,6 +642,7 @@ BCLR.MouseButton1Click:Connect(function()
         if c:IsA("TextButton") then c:Destroy() end
     end
     showDetail(nil);CNTL.Text="0"
+    EMPTYLBL.Visible=true  -- ★ 清除後顯示提示
     st("🗑 清除",K.dim)
 end)
 
@@ -671,4 +695,4 @@ ESP.MouseButton1Click:Connect(function() stopAll() end)
 -- ── 啟動 ──────────────────────────────────────────────
 refreshList()
 st("✅ 啟動，監聽中…",K.grn)
-print("[RSP v5] Delta ready")
+print("[RSP v5] Delta ready - Fixed version")
