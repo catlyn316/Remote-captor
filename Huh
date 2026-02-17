@@ -7,12 +7,16 @@
 
 local UIS = game:GetService("UserInputService")
 local PL  = game:GetService("Players").LocalPlayer
+local RS  = game:GetService("RunService")
 
 -- ── 資料 ──────────────────────────────────────────────
 local captured = {}
 local selId    = nil
 local loops    = {}; local loopN = 0
 local fRE, fRF = true, true
+
+-- ★ 事件佇列：hook 執行緒 → 主執行緒
+local pendingQueue = {}
 
 -- ── 工具 ──────────────────────────────────────────────
 local function getPath(o)
@@ -476,15 +480,42 @@ local function makeRow(e)
         BackgroundTransparency=1,TextColor3=K.dim,Font=Enum.Font.Gotham,
         TextSize=7,TextXAlignment=Enum.TextXAlignment.Right},row)
 
-    local prev=#e.args>0 and ser(e.args[1]):sub(1,22)..(#e.args>1 and "…" or "") or "(空)"
+    local prev
+    if #e.args>0 then
+        local ok, result = pcall(function() return ser(e.args[1]):sub(1,22) end)
+        if ok then
+            prev = result..(#e.args>1 and "…" or "")
+        else
+            prev = "(錯誤)"..(#e.args>1 and "…" or "")
+        end
+    else
+        prev = "(空)"
+    end
     L({Text=prev,Size=UDim2.new(1,-5,0,11),Position=UDim2.new(0,3,0,18),
         BackgroundTransparency=1,TextColor3=K.dim,Font=Enum.Font.Code,
         TextSize=7,TextXAlignment=Enum.TextXAlignment.Left,
         TextTruncate=Enum.TextTruncate.AtEnd},row)
 
     row.MouseButton1Click:Connect(function()
-        selId=e.id; CBOX.Text=e.code
-        refreshList(); showDetail(e)
+        -- ★ 只更新選中狀態，不重建整個列表
+        local oldSelId = selId
+        selId=e.id
+        CBOX.Text=e.code
+        showDetail(e)
+        
+        -- ★ 只更新視覺效果：取消舊選中，設置新選中
+        if oldSelId ~= selId then
+            for _,c in ipairs(LSF:GetChildren()) do
+                if c:IsA("TextButton") then
+                    local isSelected = (c.LayoutOrder == -selId)
+                    c.BackgroundColor3 = isSelected and K.sel or K.p2
+                    -- 更新邊框
+                    local stroke = c:FindFirstChildOfClass("UIStroke")
+                    if stroke then stroke:Destroy() end
+                    if isSelected then stk(K.acc,1,c) end
+                end
+            end
+        end
     end)
     row.MouseEnter:Connect(function()
         if selId~=e.id then row.BackgroundColor3=K.hov end
@@ -523,11 +554,38 @@ showDetail=function(e)
 end
 
 -- ── _G 橋接 ───────────────────────────────────────────
+-- ★ Hook 執行緒只放入佇列，不碰任何 GUI Instance
 _G._RSP5=function(e)
-    makeRow(e)
-    CNTL.Text=#captured.." | ?"
-    EMPTYLBL.Visible=false  -- ★ 有事件時隱藏提示
+    pendingQueue[#pendingQueue+1] = e
 end
+
+-- ★ Heartbeat 在主執行緒處理佇列，可以安全創建 GUI
+RS.Heartbeat:Connect(function()
+    if #pendingQueue == 0 then return end
+    local batch = pendingQueue
+    pendingQueue = {}
+    for _, e in ipairs(batch) do
+        local mt=(e.rtype=="RemoteEvent" and fRE) or (e.rtype=="RemoteFunction" and fRF)
+        if mt then
+            local ok, err = pcall(makeRow, e)
+            if ok then
+                EMPTYLBL.Visible=false
+            else
+                warn("[RSP] makeRow error:", err)
+            end
+        end
+        -- 更新計數
+        local term=SRCH.Text:lower()
+        local shown=0
+        for i=#captured,1,-1 do
+            local ev=captured[i]
+            local match_type=(ev.rtype=="RemoteEvent" and fRE) or (ev.rtype=="RemoteFunction" and fRF)
+            local match_name=term=="" or ev.name:lower():find(term,1,true)
+            if match_type and match_name then shown=shown+1 end
+        end
+        CNTL.Text=#captured.." | "..shown
+    end
+end)
 
 -- ── 執行 ──────────────────────────────────────────────
 local function runOnce(code)
@@ -652,13 +710,13 @@ BRE.MouseButton1Click:Connect(function()
     fRE=not fRE
     BRE.BackgroundColor3=fRE and Color3.fromRGB(15,40,64) or K.p2
     BRE.TextColor3=fRE and K.RE or K.dim
-    refreshList()
+    refreshList()  -- ★ 重新整理列表，顯示/隱藏 RE 事件
 end)
 BRF2.MouseButton1Click:Connect(function()
     fRF=not fRF
     BRF2.BackgroundColor3=fRF and Color3.fromRGB(44,15,64) or K.p2
     BRF2.TextColor3=fRF and K.RF or K.dim
-    refreshList()
+    refreshList()  -- ★ 重新整理列表，顯示/隱藏 RF 事件
 end)
 
 ACPY.MouseButton1Click:Connect(function()
