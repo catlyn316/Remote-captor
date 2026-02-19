@@ -3,7 +3,10 @@
 --        介面佈局重新計算，移除 ClipsDescendants
 --        修正縮小後點擊誤觸問題（只有點小方塊才展開）
 --        修正縮小後 TF 超出圓角（動態圓角切換）
+--        修正 hook 執行緒無法創建 GUI（用 Heartbeat 橋接主執行緒）
 --        新增無事件提示
+--        新增複選模式（可複選多個事件一起執行/重複）
+--        新增封鎖功能（封鎖同名+同路徑的事件，不顯示也不觸發）
 
 local UIS = game:GetService("UserInputService")
 local PL  = game:GetService("Players").LocalPlayer
@@ -12,6 +15,9 @@ local RS  = game:GetService("RunService")
 -- ── 資料 ──────────────────────────────────────────────
 local captured = {}
 local selId    = nil
+local selIds   = {}  -- ★ 複選的 ID 集合
+local multiSel = false  -- ★ 是否開啟複選模式
+local blocked  = {}  -- ★ 封鎖清單 {["路徑|名稱"] = true}
 local loops    = {}; local loopN = 0
 local fRE, fRF = true, true
 
@@ -67,6 +73,16 @@ end
 local function exec(code)
     local ok,err=pcall(function() assert(loadstring(code))() end)
     return ok,err
+end
+
+-- ★ 工具：產生事件的封鎖 key
+local function getBlockKey(e)
+    return e.path.."|"..e.name
+end
+
+-- ★ 工具：檢查事件是否被封鎖
+local function isBlocked(e)
+    return blocked[getBlockKey(e)] == true
 end
 
 -- ── HOOK ──────────────────────────────────────────────
@@ -188,8 +204,14 @@ local function tB(txt,col,xOff)
 end
 local BCLOSE=tB("x",  K.red, -28)
 local BMIN  =tB("-",  K.yel, -56)
-local BCLR=B({Text="清",Size=UDim2.new(0,24,0,20),
+local BMULTI=B({Text="☑",Size=UDim2.new(0,24,0,20),  -- ★ 複選按鈕
     Position=UDim2.new(1,-84,0,4),
+    BackgroundColor3=K.p2,TextColor3=K.dim,
+    Font=Enum.Font.GothamBold,TextSize=12,
+    BorderSizePixel=0,ZIndex=10},TF)
+rnd(4,BMULTI); stk(K.bdr,1,BMULTI)
+local BCLR=B({Text="清",Size=UDim2.new(0,24,0,20),
+    Position=UDim2.new(1,-112,0,4),
     BackgroundColor3=K.p2,TextColor3=K.dim,
     Font=Enum.Font.Gotham,TextSize=10,
     BorderSizePixel=0,ZIndex=10},TF)
@@ -278,11 +300,12 @@ UIS.InputEnded:Connect(function(inp)
                 mini=false
                 BODY.Visible=true; SBF.Visible=true
                 EF.Visible=true;   STL.Visible=true
-                BCLR.Visible=true; CNTL.Visible=true
+                BCLR.Visible=true; BMULTI.Visible=true  -- ★ 複選按鈕
+                CNTL.Visible=true
                 TITLELBL.Visible=true; BYLBL.Visible=true
                 MINILBL.Visible=false
                 WIN.Size=UDim2.new(0,420,0,352); TF.Size=UDim2.new(1,0,0,28)
-                TF_CORNER.CornerRadius = UDim.new(0,0)  -- ★ 展開時移除圓角
+                TF_CORNER.CornerRadius = UDim.new(0,0)
                 BCLOSE.Visible=true; BMIN.Visible=true; tc.Visible=true
             end
         end
@@ -366,6 +389,7 @@ local ACPY=aB("📋 代碼",K.acc, 0, 0, 76)
 local APTH=aB("🔗 路徑",K.dim,80, 0, 72)
 local ARN1=aB("▶ 執行", K.grn, 0,24, 60)
 local ALOP=aB("🔁 重複",K.yel,64,24, 68)
+local ABLK=aB("🚫 封鎖",K.red,136,24, 68)  -- ★ 封鎖按鈕
 
 L({Text="隔幾秒",Size=UDim2.new(0,32,0,10),Position=UDim2.new(0,0,0,46),
     BackgroundTransparency=1,TextColor3=K.dim,Font=Enum.Font.Gotham,TextSize=7},ABF)
@@ -428,6 +452,7 @@ rnd(2,ETB); stk(K.bdr,1,ETB)
 
 local ELP=eB("🔁 重複",K.yel,207, 58)
 local ESP=eB("⬛ 全停", K.red,269, 50)
+local EUNB=eB("✓ 解鎖",K.acc,323, 70)  -- ★ 解除全部封鎖按鈕
 
 -- 狀態列 Y=340
 local STL=L({Text="就緒",Size=UDim2.new(1,-8,0,10),
@@ -457,12 +482,15 @@ local showDetail, refreshList
 local function makeRow(e)
     local isRE=e.rtype=="RemoteEvent"
     local rc=isRE and K.RE or K.RF
+    
+    -- ★ 判斷是否被選中（單選或複選）
+    local isSelected = (not multiSel and selId==e.id) or (multiSel and selIds[e.id])
 
     local row=B({Text="",Size=UDim2.new(1,-4,0,30),
-        BackgroundColor3=selId==e.id and K.sel or K.p2,
+        BackgroundColor3=isSelected and K.sel or K.p2,
         BorderSizePixel=0,AutoButtonColor=false,LayoutOrder=-e.id},LSF)
     rnd(4,row)
-    if selId==e.id then stk(K.acc,1,row) end
+    if isSelected then stk(K.acc,1,row) end
 
     local bdg=L({Text=isRE and "RE" or "RF",
         Size=UDim2.new(0,18,0,11),Position=UDim2.new(0,3,0,4),
@@ -470,6 +498,12 @@ local function makeRow(e)
         TextColor3=rc,Font=Enum.Font.GothamBold,TextSize=7,
         TextXAlignment=Enum.TextXAlignment.Center},row)
     rnd(3,bdg); stk(rc,1,bdg)
+    
+    -- ★ 封鎖標記
+    if isBlocked(e) then
+        L({Text="🚫",Size=UDim2.new(0,12,0,12),Position=UDim2.new(0,22,0,3),
+            BackgroundTransparency=1,TextColor3=K.red,Font=Enum.Font.Gotham,TextSize=8},row)
+    end
 
     L({Text=e.name,Size=UDim2.new(1,-26,0,14),Position=UDim2.new(0,24,0,2),
         BackgroundTransparency=1,TextColor3=K.txt,Font=Enum.Font.GothamBold,
@@ -497,31 +531,64 @@ local function makeRow(e)
         TextTruncate=Enum.TextTruncate.AtEnd},row)
 
     row.MouseButton1Click:Connect(function()
-        -- ★ 只更新選中狀態，不重建整個列表
-        local oldSelId = selId
-        selId=e.id
-        CBOX.Text=e.code
-        showDetail(e)
-        
-        -- ★ 只更新視覺效果：取消舊選中，設置新選中
-        if oldSelId ~= selId then
+        if multiSel then
+            -- ★ 複選模式：切換選中狀態
+            selIds[e.id] = not selIds[e.id]
+            if selIds[e.id] then
+                row.BackgroundColor3=K.sel
+                local stroke = row:FindFirstChildOfClass("UIStroke")
+                if stroke then stroke:Destroy() end
+                stk(K.acc,1,row)
+                -- 更新代碼框（顯示第一個選中的）
+                for id in pairs(selIds) do
+                    for _,ev in ipairs(captured) do
+                        if ev.id==id then CBOX.Text=ev.code; break end
+                    end
+                    break
+                end
+            else
+                row.BackgroundColor3=K.p2
+                local stroke = row:FindFirstChildOfClass("UIStroke")
+                if stroke then stroke:Destroy() end
+                -- 如果沒有選中的事件了，清空代碼框
+                local hasSelected = false
+                for _ in pairs(selIds) do hasSelected=true; break end
+                if not hasSelected then CBOX.Text="" end
+            end
+        else
+            -- ★ 單選模式：只更新選中狀態
+            local oldSelId = selId
+            selId=e.id
+            CBOX.Text=e.code
+            showDetail(e)
+            
+            -- ★ 更新所有 row 的視覺狀態
             for _,c in ipairs(LSF:GetChildren()) do
                 if c:IsA("TextButton") then
-                    local isSelected = (c.LayoutOrder == -selId)
-                    c.BackgroundColor3 = isSelected and K.sel or K.p2
-                    -- 更新邊框
+                    local isSel = (c.LayoutOrder == -selId)
+                    c.BackgroundColor3 = isSel and K.sel or K.p2
                     local stroke = c:FindFirstChildOfClass("UIStroke")
                     if stroke then stroke:Destroy() end
-                    if isSelected then stk(K.acc,1,c) end
+                    if isSel then stk(K.acc,1,c) end
                 end
             end
         end
     end)
+    
+    -- ★ 動態檢查是否被選中
+    local function checkSelected()
+        if multiSel then
+            return selIds[e.id] == true
+        else
+            return selId == e.id
+        end
+    end
+    
     row.MouseEnter:Connect(function()
-        if selId~=e.id then row.BackgroundColor3=K.hov end
+        if not checkSelected() then row.BackgroundColor3=K.hov end
     end)
     row.MouseLeave:Connect(function()
-        if selId~=e.id then row.BackgroundColor3=K.p2 end
+        if not checkSelected() then row.BackgroundColor3=K.p2 end
     end)
 end
 
@@ -533,13 +600,16 @@ refreshList=function()
     local term=SRCH.Text:lower(); local shown=0
     for i=#captured,1,-1 do
         local e=captured[i]
-        local mt=(e.rtype=="RemoteEvent" and fRE) or (e.rtype=="RemoteFunction" and fRF)
-        local mn=term=="" or e.name:lower():find(term,1,true)
-        if mt and mn then makeRow(e);shown=shown+1 end
+        -- ★ 被封鎖的事件不顯示
+        if not isBlocked(e) then
+            local mt=(e.rtype=="RemoteEvent" and fRE) or (e.rtype=="RemoteFunction" and fRF)
+            local mn=term=="" or e.name:lower():find(term,1,true)
+            if mt and mn then makeRow(e);shown=shown+1 end
+        end
     end
     CNTL.Text=#captured.." | "..shown
     -- ★ 控制無事件提示顯示
-    EMPTYLBL.Visible = (#captured == 0)
+    EMPTYLBL.Visible = (shown == 0)
 end
 
 -- ── showDetail ────────────────────────────────────────
@@ -565,13 +635,16 @@ RS.Heartbeat:Connect(function()
     local batch = pendingQueue
     pendingQueue = {}
     for _, e in ipairs(batch) do
-        local mt=(e.rtype=="RemoteEvent" and fRE) or (e.rtype=="RemoteFunction" and fRF)
-        if mt then
-            local ok, err = pcall(makeRow, e)
-            if ok then
-                EMPTYLBL.Visible=false
-            else
-                warn("[RSP] makeRow error:", err)
+        -- ★ 被封鎖的事件不顯示
+        if not isBlocked(e) then
+            local mt=(e.rtype=="RemoteEvent" and fRE) or (e.rtype=="RemoteFunction" and fRF)
+            if mt then
+                local ok, err = pcall(makeRow, e)
+                if ok then
+                    EMPTYLBL.Visible=false
+                else
+                    warn("[RSP] makeRow error:", err)
+                end
             end
         end
         -- 更新計數
@@ -579,9 +652,12 @@ RS.Heartbeat:Connect(function()
         local shown=0
         for i=#captured,1,-1 do
             local ev=captured[i]
-            local match_type=(ev.rtype=="RemoteEvent" and fRE) or (ev.rtype=="RemoteFunction" and fRF)
-            local match_name=term=="" or ev.name:lower():find(term,1,true)
-            if match_type and match_name then shown=shown+1 end
+            -- ★ 計數時也要排除被封鎖的
+            if not isBlocked(ev) then
+                local match_type=(ev.rtype=="RemoteEvent" and fRE) or (ev.rtype=="RemoteFunction" and fRF)
+                local match_name=term=="" or ev.name:lower():find(term,1,true)
+                if match_type and match_name then shown=shown+1 end
+            end
         end
         CNTL.Text=#captured.." | "..shown
     end
@@ -616,8 +692,20 @@ local function stopAll()
 end
 
 local function getSel()
-    if not selId then return nil end
-    for _,e in ipairs(captured) do if e.id==selId then return e end end
+    if multiSel then
+        -- ★ 複選模式：返回所有選中的事件
+        local sel = {}
+        for id in pairs(selIds) do
+            for _,e in ipairs(captured) do
+                if e.id==id then table.insert(sel,e); break end
+            end
+        end
+        return sel
+    else
+        -- ★ 單選模式：返回單個事件
+        if not selId then return nil end
+        for _,e in ipairs(captured) do if e.id==selId then return e end end
+    end
 end
 
 -- ── 按鈕事件 ──────────────────────────────────────────
@@ -630,6 +718,7 @@ BMIN.MouseButton1Click:Connect(function()
     EF.Visible      = not mini
     STL.Visible     = not mini
     BCLR.Visible    = not mini
+    BMULTI.Visible  = not mini  -- ★ 複選按鈕
     CNTL.Visible    = not mini
     TITLELBL.Visible= not mini
     BYLBL.Visible   = not mini
@@ -649,6 +738,23 @@ BMIN.MouseButton1Click:Connect(function()
         BMIN.Visible   = true
         tc.Visible     = true
     end
+end)
+
+-- ★ 複選按鈕
+BMULTI.MouseButton1Click:Connect(function()
+    multiSel = not multiSel
+    if multiSel then
+        BMULTI.BackgroundColor3 = K.acc
+        BMULTI.TextColor3 = K.txt
+        selIds = {}
+        st("☑ 複選模式", K.acc)
+    else
+        BMULTI.BackgroundColor3 = K.p2
+        BMULTI.TextColor3 = K.dim
+        selIds = {}
+        st("單選模式", K.dim)
+    end
+    refreshList()
 end)
 
 -- ★ 點擊縮小後的小方塊展開（觸控版，修正誤觸）
@@ -683,24 +789,25 @@ UIS.TouchEnded:Connect(function(touch, _)
             mini = false
             BODY.Visible=true; SBF.Visible=true
             EF.Visible=true;   STL.Visible=true
-            BCLR.Visible=true; CNTL.Visible=true
+            BCLR.Visible=true; BMULTI.Visible=true  -- ★ 複選按鈕
+            CNTL.Visible=true
             TITLELBL.Visible=true; BYLBL.Visible=true
             MINILBL.Visible=false
             WIN.Size   = UDim2.new(0,420,0,352)
             TF.Size    = UDim2.new(1,0,0,28)
-            TF_CORNER.CornerRadius = UDim.new(0,0)  -- ★ 展開時移除圓角
+            TF_CORNER.CornerRadius = UDim.new(0,0)
             BCLOSE.Visible=true; BMIN.Visible=true; tc.Visible=true
         end
     end
 end)
 
 BCLR.MouseButton1Click:Connect(function()
-    captured={};selId=nil
+    captured={};selId=nil;selIds={}  -- ★ 也清空複選
     for _,c in ipairs(LSF:GetChildren()) do
         if c:IsA("TextButton") then c:Destroy() end
     end
     showDetail(nil);CNTL.Text="0"
-    EMPTYLBL.Visible=true  -- ★ 清除後顯示提示
+    EMPTYLBL.Visible=true
     st("🗑 清除",K.dim)
 end)
 
@@ -720,22 +827,74 @@ BRF2.MouseButton1Click:Connect(function()
 end)
 
 ACPY.MouseButton1Click:Connect(function()
-    local e=getSel();if not e then st("⚠ 先選事件",K.yel);return end
-    clip(e.code);st("📋 代碼已複製",K.grn)
+    local sel=getSel()
+    if multiSel then
+        if not sel or #sel==0 then st("⚠ 先選事件",K.yel);return end
+        local codes={}
+        for _,e in ipairs(sel) do table.insert(codes,e.code) end
+        clip(table.concat(codes,"\n"));st("📋 已複製 "..#sel.." 個",K.grn)
+    else
+        if not sel then st("⚠ 先選事件",K.yel);return end
+        clip(sel.code);st("📋 代碼已複製",K.grn)
+    end
 end)
 APTH.MouseButton1Click:Connect(function()
-    local e=getSel();if not e then st("⚠ 先選事件",K.yel);return end
-    clip(e.path);st("🔗 路徑已複製",K.grn)
+    local sel=getSel()
+    if multiSel then
+        if not sel or #sel==0 then st("⚠ 先選事件",K.yel);return end
+        local paths={}
+        for _,e in ipairs(sel) do table.insert(paths,e.path) end
+        clip(table.concat(paths,"\n"));st("🔗 已複製 "..#sel.." 個",K.grn)
+    else
+        if not sel then st("⚠ 先選事件",K.yel);return end
+        clip(sel.path);st("🔗 路徑已複製",K.grn)
+    end
 end)
 ARN1.MouseButton1Click:Connect(function()
-    local e=getSel();if not e then st("⚠ 先選事件",K.yel);return end
-    runOnce(e.code)
+    local sel=getSel()
+    if multiSel then
+        if not sel or #sel==0 then st("⚠ 先選事件",K.yel);return end
+        for _,e in ipairs(sel) do runOnce(e.code) end
+        st("▶ 執行 "..#sel.." 個",K.grn)
+    else
+        if not sel then st("⚠ 先選事件",K.yel);return end
+        runOnce(sel.code)
+    end
 end)
 ALOP.MouseButton1Click:Connect(function()
-    local e=getSel();if not e then st("⚠ 先選事件",K.yel);return end
-    startLoop(e.code,
-        math.max(0.05,tonumber(IBOX.Text) or 1),
-        math.max(0,tonumber(TBOX.Text) or 0))
+    local sel=getSel()
+    if multiSel then
+        if not sel or #sel==0 then st("⚠ 先選事件",K.yel);return end
+        local iv=math.max(0.05,tonumber(IBOX.Text) or 1)
+        local tm=math.max(0,tonumber(TBOX.Text) or 0)
+        for _,e in ipairs(sel) do startLoop(e.code,iv,tm) end
+        st("🔁 啟動 "..#sel.." 個",K.yel)
+    else
+        if not sel then st("⚠ 先選事件",K.yel);return end
+        startLoop(sel.code,
+            math.max(0.05,tonumber(IBOX.Text) or 1),
+            math.max(0,tonumber(TBOX.Text) or 0))
+    end
+end)
+
+-- ★ 封鎖按鈕
+ABLK.MouseButton1Click:Connect(function()
+    local sel=getSel()
+    if multiSel then
+        if not sel or #sel==0 then st("⚠ 先選事件",K.yel);return end
+        for _,e in ipairs(sel) do
+            local key = getBlockKey(e)
+            blocked[key] = true
+        end
+        st("🚫 已封鎖 "..#sel.." 個",K.red)
+    else
+        if not sel then st("⚠ 先選事件",K.yel);return end
+        local key = getBlockKey(sel)
+        blocked[key] = true
+        st("🚫 已封鎖: "..sel.name,K.red)
+    end
+    selIds={}; selId=nil
+    refreshList()
 end)
 
 ERN.MouseButton1Click:Connect(function()
@@ -749,6 +908,15 @@ ELP.MouseButton1Click:Connect(function()
         math.max(0,tonumber(ETB.Text) or 0))
 end)
 ESP.MouseButton1Click:Connect(function() stopAll() end)
+
+-- ★ 解除全部封鎖按鈕
+EUNB.MouseButton1Click:Connect(function()
+    local n=0
+    for _ in pairs(blocked) do n=n+1 end
+    blocked={}
+    refreshList()
+    st("✓ 解除 "..n.." 個封鎖",K.acc)
+end)
 
 -- ── 啟動 ──────────────────────────────────────────────
 refreshList()
